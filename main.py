@@ -1,123 +1,123 @@
 
+
 import os
-import time
 import requests
 from datetime import datetime, timezone
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 FOOTBALL_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing")
-
 TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
 API = "https://api.football-data.org/v4/matches"
 
-subscribers = set()
-last_update_id = 0
-last_report = 0
 
 def send(chat_id, message):
+    if not BOT_TOKEN:
+        return
     requests.post(
         f"{TG}/sendMessage",
         json={"chat_id": chat_id, "text": message},
-        timeout=30
+        timeout=20
     )
+
 
 def get_matches():
     if not FOOTBALL_TOKEN:
-        return "Football API key এখনো সেট করা হয়নি।"
+        return "Football API Token সেট করা নেই।"
 
     today = datetime.now(timezone.utc).date().isoformat()
 
-    response = requests.get(
-        API,
-        headers={"X-Auth-Token": FOOTBALL_TOKEN},
-        params={"dateFrom": today, "dateTo": today},
-        timeout=30
-    )
-    response.raise_for_status()
+    try:
+        response = requests.get(
+            API,
+            headers={"X-Auth-Token": FOOTBALL_TOKEN},
+            params={"dateFrom": today, "dateTo": today},
+            timeout=25
+        )
+        response.raise_for_status()
+        matches = response.json().get("matches", [])
 
-    matches = response.json().get("matches", [])
+        if not matches:
+            return "আজকের জন্য কোনো ম্যাচের তথ্য পাওয়া যায়নি।"
 
-    if not matches:
-        return "আজকের জন্য কোনো ম্যাচের তথ্য পাওয়া যায়নি।"
+        lines = ["⚽ DIPU GAME RADAR\nআজকের ফুটবল ম্যাচ:\n"]
 
-    lines = ["⚽ DIPU GAME RADAR\nআজকের ফুটবল আপডেট:\n"]
+        for match in matches[:30]:
+            home = match.get("homeTeam", {}).get("name", "Unknown")
+            away = match.get("awayTeam", {}).get("name", "Unknown")
+            status = match.get("status", "UNKNOWN")
+            score = match.get("score", {}).get("fullTime", {})
+            hs = score.get("home")
+            aws = score.get("away")
 
-    for match in matches[:30]:
-        home = match["homeTeam"].get("name", "Unknown")
-        away = match["awayTeam"].get("name", "Unknown")
-        status = match.get("status", "UNKNOWN")
+            result = f"{hs} - {aws}" if hs is not None and aws is not None else "স্কোর পাওয়া যায়নি"
 
-        score = match.get("score", {}).get("fullTime", {})
-        home_score = score.get("home")
-        away_score = score.get("away")
+            lines.append(
+                f"⚽ {home} vs {away}\n"
+                f"🥅 {result}\n"
+                f"📌 Status: {status}\n"
+            )
 
-        if home_score is not None and away_score is not None:
-            result = f"{home_score} - {away_score}"
-        else:
-            result = "এখনো স্কোর নেই"
+        return "\n".join(lines)
 
-        lines.append(
-            f"🏟 {home} vs {away}\n"
-            f"📊 {result}\n"
-            f"📌 Status: {status}\n"
+    except Exception as error:
+        print("Football API error:", error)
+        return "ম্যাচের তথ্য আনতে সমস্যা হয়েছে। পরে আবার চেষ্টা করুন।"
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Dipu Game Radar Bot is running!"
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    if not BOT_TOKEN:
+        return "Bot token missing", 500
+
+    update = request.get_json(silent=True) or {}
+    message = update.get("message", {})
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    command = message.get("text", "").strip().lower()
+
+    if not chat_id:
+        return jsonify({"ok": True})
+
+    if command.startswith("/start"):
+        send(
+            chat_id,
+            "⚽ Welcome to Dipu Game Radar!\n\n"
+            "আজকের ফুটবল ম্যাচ দেখতে /today লিখুন।"
         )
 
-    return "\n".join(lines)
+    elif command.startswith("/today"):
+        send(chat_id, get_matches())
 
-def main():
-    global last_update_id, last_report
+    return jsonify({"ok": True})
 
-    print("Dipu Game Radar Bot is running...")
 
-    while True:
+def setup_webhook():
+    base_url = os.getenv("RENDER_EXTERNAL_URL")
+
+    if BOT_TOKEN and base_url:
         try:
-            updates = requests.get(
-                f"{TG}/getUpdates",
-                params={
-                    "offset": last_update_id + 1,
-                    "timeout": 30
-                },
-                timeout=35
-            ).json()
-
-            for update in updates.get("result", []):
-                last_update_id = update["update_id"]
-
-                msg = update.get("message", {})
-                chat = msg.get("chat", {})
-                chat_id = chat.get("id")
-                command = msg.get("text", "")
-
-                if not chat_id:
-                    continue
-
-                if command.startswith("/start"):
-                    subscribers.add(chat_id)
-                    send(
-                        chat_id,
-                        "⚽ Welcome to Dipu Game Radar!\n\n"
-                        "প্রতি ৩০ মিনিটে ফুটবল আপডেট পাবে।\n"
-                        "/today লিখে আজকের ম্যাচ দেখো।"
-                    )
-
-                elif command.startswith("/today"):
-                    subscribers.add(chat_id)
-                    send(chat_id, get_matches())
-
-            if time.time() - last_report >= 1800:
-                if subscribers:
-                    report = get_matches()
-                    for chat_id in list(subscribers):
-                        send(chat_id, report)
-
-                last_report = time.time()
-
+            response = requests.get(
+                f"{TG}/setWebhook",
+                params={"url": f"{base_url}/webhook"},
+                timeout=20
+            )
+            print("Webhook setup:", response.text)
         except Exception as error:
-            print("Error:", error)
-            time.sleep(10)
+            print("Webhook setup error:", error)
 
-if __name__ == "__main__":
-    main()
+
+setup_webhook()
